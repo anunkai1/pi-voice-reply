@@ -241,16 +241,83 @@ export default function (pi: ExtensionAPI) {
 
 	/**
 	 * Explicit /voice command — the guaranteed trigger that doesn't depend
-	 * on phrase detection.
+	 * on phrase detection. Sets the flag for the NEXT reply.
 	 */
 	pi.registerCommand("voice", {
-		description: "Request a spoken voice reply for the next/current answer",
+		description: "Request a spoken voice reply for the next answer",
 		handler: async (_args, ctx) => {
 			voiceRequested = true;
 			ctx.ui.notify(
 				"Voice reply requested — speak buttons will appear on the next answer.",
 				"info",
 			);
+		},
+	});
+
+	/**
+	 * /voice-last — retroactive voice reply. Rewrites the most recent
+	 * assistant message in the session (regardless of when it was
+	 * produced) into long + short spoken variants and emits the same
+	 * voice-reply custom message the proactive path emits. This is what
+	 * the browser's per-message 🎫 button calls: press it after reading
+	 * a reply to hear a listenable version, no trigger phrase needed.
+	 *
+	 * Reads the last assistant text straight from the session branch
+	 * (no cache), so it's always accurate even across reloads.
+	 */
+	pi.registerCommand("voice-last", {
+		description: "Generate a spoken voice reply for the most recent assistant message",
+		handler: async (_args, ctx) => {
+			// Find the last assistant message in the session branch.
+			const entries = ctx.sessionManager.getBranch();
+			let lastText = "";
+			for (let i = entries.length - 1; i >= 0; i--) {
+				const entry = entries[i];
+				// biome-ignore lint/suspicious/noExplicitAny: entry union is wide
+				if (entry && (entry as any).type === "message") {
+					const msg = (entry as any).message;
+					if (msg && msg.role === "assistant") {
+						lastText = assistantText(msg.content);
+						if (lastText.trim()) break;
+					}
+				}
+			}
+			if (!lastText.trim()) {
+				ctx.ui.notify("No assistant message to voice yet.", "warning");
+				return;
+			}
+
+			if (ctx.ui?.setStatus) ctx.ui.setStatus("voice-reply", "preparing voice reply…");
+			try {
+				const [long, short] = await Promise.all([
+					rewriteForSpeech(ctx, LONG_PROMPT, lastText),
+					rewriteForSpeech(ctx, SHORT_PROMPT, lastText),
+				]);
+				if (!long && !short) {
+					if (ctx.ui?.notify) ctx.ui.notify("Voice reply: model produced no output.", "warning");
+					return;
+				}
+				spuriousTurnPending = true;
+				pi.sendMessage(
+					{
+						customType: "voice-reply",
+						content: "voice reply ready",
+						display: true,
+						details: { long: long ?? "", short: short ?? "" },
+					},
+					{ deliverAs: "steer", triggerTurn: false },
+				);
+			} catch (err) {
+				console.warn("[pi-voice-reply] retroactive rewrite failed:", err);
+				if (ctx.ui?.notify) {
+					ctx.ui.notify(
+						`Voice reply failed: ${err instanceof Error ? err.message : String(err)}`,
+						"warning",
+					);
+				}
+			} finally {
+				if (ctx.ui?.setStatus) ctx.ui.setStatus("voice-reply", undefined);
+			}
 		},
 	});
 
