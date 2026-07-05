@@ -1,0 +1,11 @@
+{
+  "name": "pi-voice-reply",
+  "version": "0.1.0",
+  "description": "On-trigger spoken-summary voice replies for the pi coding agent. Emits long + short listenable variants of an assistant reply for agentchatbox to speak.",
+  "keywords": ["pi-package"],
+  "type": "module",
+  "pi": {
+    "extensions": ["./extensions"]
+  },
+  "dependencies": {}
+}
