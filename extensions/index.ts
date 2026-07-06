@@ -177,10 +177,69 @@ export default function (pi: ExtensionAPI) {
 	// Turn-level flag, set by the input handler when the user asks for voice.
 	let voiceRequested = false;
 	let currentCtx: ExtensionContext | undefined;
-	// Set true right before we emit the voice-reply custom message, cleared
-	// by the next before_agent_start. The spurious turn is the one the
-	// model starts because sendMessage fed "voice reply ready" into context.
+	// Backstop flag: set right before we emit the voice-reply custom
+	// message (see emitVoiceReply). If a race ever lets that emit trigger a
+	// spurious continuation turn, the message_end handler below blanks it so
+	// the client never sees a stray reply. With the idle-defer in place this
+	// rarely (never) fires, but it's cheap insurance.
 	let spuriousTurnPending = false;
+
+	/**
+	 * Emit the voice-reply custom message to clients WITHOUT triggering a
+	 * spurious model turn.
+	 *
+	 * THE BUG THIS FIXES: calling pi.sendMessage(msg, {deliverAs:"steer"})
+	 * from inside the agent_end handler routes to sendCustomMessage's
+	 * streaming branch — the agent is still mid-run when agent_end fires
+	 * (the event is emitted from inside _runAgentPrompt, before the
+	 * post-run drain loop exits). The queued steer is then drained as a
+	 * CONTINUATION TURN: the model runs again on the same context and its
+	 * streamed tokens reach the client as a visible second reply before
+	 * message_end can blank them — exactly the "it replied twice"
+	 * symptom users hit when saying "reply in voice".
+	 *
+	 * THE FIX: don't emit from inside the handler. Defer the emit to the
+	 * macrotask queue and poll ctx.isIdle() until the run loop has fully
+	 * unwound (isStreaming false). sendCustomMessage then takes its idle
+	 * branch, which persists the custom_message and emits message_start /
+	 * message_end but queues NOTHING — so there is no continuation and no
+	 * spurious turn.
+	 *
+	 * We must NOT await isIdle() inside the handler itself: the run loop
+	 * cannot exit (and flip isStreaming off) until the handler returns, so
+	 * blocking on it would deadlock. Fire-and-forget is the only safe shape.
+	 */
+	const emitVoiceReply = (
+		ctx: ExtensionContext | undefined,
+		details: { long: string; short: string },
+	): void => {
+		const fire = (): void => {
+			spuriousTurnPending = true;
+			pi.sendMessage(
+				{
+					customType: "voice-reply",
+					content: "voice reply ready",
+					display: true,
+					details,
+				},
+				{ deliverAs: "steer", triggerTurn: false },
+			);
+		};
+		// Deadline guards against an agent that never goes idle (another
+		// extension keeping it busy, or a stuck state): after 5s, emit
+		// anyway and rely on the blanking backstop instead of leaking the
+		// buttons forever.
+		const deadline = Date.now() + 5000;
+		const poll = (): void => {
+			const idle = typeof ctx?.isIdle === "function" ? ctx.isIdle() : true;
+			if (idle || Date.now() >= deadline) fire();
+			else setTimeout(poll, 30);
+		};
+		// setTimeout(0) defers out of the current handler/run-loop onto the
+		// macrotask queue, so the handler returns immediately and the run
+		// loop is free to unwind and flip isStreaming off.
+		setTimeout(poll, 0);
+	};
 
 	pi.on("session_start", async (_event, ctx) => {
 		currentCtx = ctx;
@@ -233,6 +292,23 @@ export default function (pi: ExtensionAPI) {
 	 */
 	pi.on("input", async (event, _ctx) => {
 		const text = typeof event.text === "string" ? event.text : "";
+		// A fresh user submission starts a real, user-driven turn. Clear
+		// any stale `spuriousTurnPending` flag here so it can never leak
+		// out of the voice-reply turn it was meant for and blank the NEXT
+		// real reply.
+		//
+		// Why this is needed: sendMessage(deliverAs:"steer", triggerTurn:false)
+		// sets spuriousTurnPending=true expecting a spurious follow-up turn
+		// to fire (whose assistant message_end we'd then blank). But with
+		// triggerTurn:false against an idle agent, that spurious turn NEVER
+		// fires — the steer just sits in the queue. The flag then leaks,
+		// and the next real turn's assistant message_end hits it and gets
+		// blanked, making that reply vanish from the client (it shows up
+		// as an empty assistant message that agentchatbox drops). Clearing
+		// on input guarantees the flag is dead before any real reply runs,
+		// while still allowing a genuine spurious turn (if one ever fires
+		// right after sendMessage, before any new input) to be blanked.
+		spuriousTurnPending = false;
 		if (userRequestsVoice(text)) {
 			voiceRequested = true;
 		}
@@ -297,16 +373,7 @@ export default function (pi: ExtensionAPI) {
 					if (ctx.ui?.notify) ctx.ui.notify("Voice reply: model produced no output.", "warning");
 					return;
 				}
-				spuriousTurnPending = true;
-				pi.sendMessage(
-					{
-						customType: "voice-reply",
-						content: "voice reply ready",
-						display: true,
-						details: { long: long ?? "", short: short ?? "" },
-					},
-					{ deliverAs: "steer", triggerTurn: false },
-				);
+				emitVoiceReply(ctx, { long: long ?? "", short: short ?? "" });
 			} catch (err) {
 				console.warn("[pi-voice-reply] retroactive rewrite failed:", err);
 				if (ctx.ui?.notify) {
@@ -361,32 +428,11 @@ export default function (pi: ExtensionAPI) {
 				return;
 			}
 
-			// Emit a custom message. agentchatbox recognizes customType
-			// "voice-reply" and renders the long/short speak buttons; other
-			// clients ignore it.
-			//
-			// sendMessage with steer emits the message_start/message_end
-			// events immediately (so the client renders the buttons right
-			// away) but also feeds the message into the model context,
-			// triggering a spurious follow-up turn (the agent replies to
-			// its own "voice reply ready" text). We cancel that turn via
-			// ctx.abort() the moment it starts — see the before_agent_start
-			// guard below, which uses the `spuriousTurnPending` flag set
-			// here. nextTurn was the alternative but it defers event
-			// emission entirely, so the browser would never see the buttons.
-			spuriousTurnPending = true;
-			pi.sendMessage(
-				{
-					customType: "voice-reply",
-					content: "voice reply ready",
-					display: true,
-					details: {
-						long: long ?? "",
-						short: short ?? "",
-					},
-				},
-				{ deliverAs: "steer", triggerTurn: false },
-			);
+			// Emit the voice-reply custom message. agentchatbox recognizes
+			// customType "voice-reply" and renders the long/short speak
+			// buttons; other clients ignore it. Deferred until idle so it
+			// doesn't trigger a spurious continuation turn — see emitVoiceReply.
+			emitVoiceReply(ctx, { long: long ?? "", short: short ?? "" });
 		} catch (err) {
 			console.warn("[pi-voice-reply] rewrite failed:", err);
 			if (ctx.ui?.notify) {
