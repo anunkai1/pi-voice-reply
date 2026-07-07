@@ -35,6 +35,7 @@ import {
 	DefaultResourceLoader,
 	SessionManager,
 } from "@earendil-works/pi-coding-agent";
+import { appendFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { resolve } from "node:path";
 
@@ -152,25 +153,133 @@ function resolveRewriteModel(ctx: ExtensionContext): ExtensionContext["model"] {
 	return ctx.model;
 }
 
+/** Human-readable "provider/modelId" for logs + notifications. */
+function modelLabel(m: { provider?: string; modelId?: string; id?: string }): string {
+	return `${m.provider ?? "?"}/${m.modelId ?? m.id ?? "?"}`;
+}
+
 /**
- * Run one rewrite pass via a throwaway in-memory sub-agent using the given
- * model and system prompt. Returns the spoken-text variant, or null if the
- * model couldn't be resolved or returned nothing useful.
+ * Append a voice-model failure to the durable log so the operator can
+ * inspect frequency and decide whether to keep VOICE_REWRITE_MODEL.
+ * Path: ~/.pi/agent/voice-reply-failures.jsonl (one JSON object per line).
+ * Best-effort — never throws.
+ */
+function logVoiceFailure(entry: {
+	provider: string;
+	modelId: string;
+	error: string;
+	fellBackTo: string;
+}): void {
+	const logPath = resolve(homedir(), ".pi", "agent", "voice-reply-failures.jsonl");
+	try {
+		appendFileSync(logPath, JSON.stringify({ ts: new Date().toISOString(), ...entry }) + "\n");
+	} catch {
+		/* best-effort */
+	}
+}
+
+/** Result of a spoken-rewrite pass, including fallback metadata. */
+interface RewriteResult {
+	text: string | null;
+	/** Present when the preferred (override) model failed and we fell back. */
+	fallback?: { provider: string; modelId: string; error: string };
+}
+
+/**
+ * Run one rewrite pass with call-time fallback to the session model if the
+ * VOICE_REWRITE_MODEL override fails (429 / quota / auth / revoked key).
  *
- * Mirrors the pattern in @s1m0n38/pi-voice's generateSpeechText(): an
- * ephemeral createAgentSession with an empty tool set and an in-memory
- * session manager, so the rewrite never touches the user's real session.
+ * Why call-time: resolveRewriteModel's hasConfiguredAuth only checks that a
+ * key EXISTS, not that the quota is alive — free-tier limits are discovered
+ * only when the call fails. On failure, retries once with ctx.model (which
+ * definitely works — the main reply just used it). Returns the text plus
+ * fallback metadata so the caller logs + notifies once per voice reply.
  */
 async function rewriteForSpeech(
 	ctx: ExtensionContext,
 	systemPrompt: string,
 	sourceText: string,
-): Promise<string | null> {
-	const model = resolveRewriteModel(ctx);
-	if (!model) {
+): Promise<RewriteResult> {
+	const preferred = resolveRewriteModel(ctx);
+	const sessionModel = ctx.model;
+
+	if (!preferred) {
 		console.warn("[pi-voice-reply] no active model; skipping rewrite");
-		return null;
+		return { text: null };
 	}
+
+	const overrideActive =
+		!!process.env.VOICE_REWRITE_MODEL?.trim() && preferred !== sessionModel;
+
+	// No override configured, or override == session model: single attempt.
+	if (!overrideActive || !sessionModel) {
+		try {
+			return { text: await runRewriteWithModel(ctx, systemPrompt, sourceText, preferred) };
+		} catch (err) {
+			console.warn("[pi-voice-reply] rewrite failed (no fallback):", err);
+			return { text: null };
+		}
+	}
+
+	// Override configured + differs: try preferred, fall back on any error.
+	try {
+		const text = await runRewriteWithModel(ctx, systemPrompt, sourceText, preferred);
+		if (text) return { text };
+		throw new Error("model produced no output");
+	} catch (err) {
+		const error = err instanceof Error ? err.message : String(err);
+		const pm = preferred as { provider?: string; modelId?: string; id?: string };
+		const provider = pm.provider ?? "?";
+		const modelId = pm.modelId ?? pm.id ?? "?";
+		console.warn(
+			`[pi-voice-reply] override ${provider}/${modelId} failed (${error}); falling back to session model.`,
+		);
+		try {
+			const text = await runRewriteWithModel(ctx, systemPrompt, sourceText, sessionModel);
+			return { text, fallback: { provider, modelId, error } };
+		} catch (err2) {
+			console.warn("[pi-voice-reply] session-model fallback also failed:", err2);
+			return { text: null, fallback: { provider, modelId, error } };
+		}
+	}
+}
+
+/**
+ * After a long+short pair, if EITHER fell back, log + notify ONCE (not per
+ * variant). The notify surfaces in the browser; the log file is the durable
+ * record for deciding whether to keep VOICE_REWRITE_MODEL.
+ */
+function reportFallbacks(ctx: ExtensionContext, results: RewriteResult[]): void {
+	const fb = results.find((r) => r.fallback)?.fallback;
+	if (!fb) return;
+	const sm = ctx.model as { provider?: string; modelId?: string; id?: string } | undefined;
+	const sessionLabel = sm ? modelLabel(sm) : "(session model)";
+	logVoiceFailure({
+		provider: fb.provider,
+		modelId: fb.modelId,
+		error: fb.error,
+		fellBackTo: sessionLabel,
+	});
+	if (ctx.ui?.notify) {
+		ctx.ui.notify(
+			`Voice model ${fb.provider}/${fb.modelId} failed (${fb.error}); used ${sessionLabel} instead. Log: ~/.pi/agent/voice-reply-failures.jsonl`,
+			"warning",
+		);
+	}
+}
+
+/**
+ * Build an ephemeral rewrite session with a SPECIFIC model and run one
+ * prompt through it. Throws on model error; returns null on empty output.
+ * Extracted from rewriteForSpeech so the fallback orchestrator can call it
+ * twice (preferred, then session model) without duplicating the session setup.
+ */
+async function runRewriteWithModel(
+	ctx: ExtensionContext,
+	systemPrompt: string,
+	sourceText: string,
+	model: NonNullable<ExtensionContext["model"]>,
+) {
 
 	const loader = new DefaultResourceLoader({
 		cwd: process.cwd(),
@@ -422,10 +531,13 @@ export default function (pi: ExtensionAPI) {
 
 			if (ctx.ui?.setStatus) ctx.ui.setStatus("voice-reply", "preparing voice reply…");
 			try {
-				const [long, short] = await Promise.all([
+				const [longR, shortR] = await Promise.all([
 					rewriteForSpeech(ctx, LONG_PROMPT, lastText),
 					rewriteForSpeech(ctx, SHORT_PROMPT, lastText),
 				]);
+				reportFallbacks(ctx, [longR, shortR]);
+				const long = longR.text;
+				const short = shortR.text;
 				if (!long && !short) {
 					if (ctx.ui?.notify) ctx.ui.notify("Voice reply: model produced no output.", "warning");
 					return;
@@ -473,10 +585,13 @@ export default function (pi: ExtensionAPI) {
 		}
 
 		try {
-			const [long, short] = await Promise.all([
+			const [longR, shortR] = await Promise.all([
 				rewriteForSpeech(ctx, LONG_PROMPT, lastAssistantText),
 				rewriteForSpeech(ctx, SHORT_PROMPT, lastAssistantText),
 			]);
+			reportFallbacks(ctx, [longR, shortR]);
+			const long = longR.text;
+			const short = shortR.text;
 
 			if (!long && !short) {
 				if (ctx.ui?.notify) {
