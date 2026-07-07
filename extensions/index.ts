@@ -104,7 +104,9 @@ function userRequestsVoice(text: string): boolean {
 	return TRIGGER_PHRASES.some((p) => lower.includes(p));
 }
 
-/** Extract the text content blocks from an assistant message. */
+/** Extract the text content blocks from a message's content (role-agnostic
+ * — works on assistant replies AND user messages, including steered ones
+ * whose content is the same [{type:"text",text}] shape). */
 function assistantText(content: unknown): string {
 	if (typeof content === "string") return content;
 	if (!Array.isArray(content)) return "";
@@ -273,6 +275,23 @@ export default function (pi: ExtensionAPI) {
 	 * consumed by the first assistant message_end after it.
 	 */
 	pi.on("message_end", async (event) => {
+		// Detect voice intent from a USER message delivered mid-turn (a steer).
+		// The `input` hook above only fires on the prompt() path — i.e. when the
+		// agent is idle and the user submits a fresh prompt. A voice phrase sent
+		// as a steer while the agent is running takes a different route: it is
+		// queued and drained between tool calls as a plain user message
+		// (message_start + message_end, role:user), never passing through
+		// emitInput(). Without this branch, "reply in voice" steered mid-run
+		// would set no flag and produce no spoken variant — the exact blind
+		// spot we hit. Steers are drained before the next assistant turn, so
+		// setting the flag here lands it in time for the agent_end handler to
+		// act on. Idempotent with the input handler: both may set the same
+		// boolean for a fresh prompt (prompt also emits message_end role:user);
+		// that's harmless, and agent_end consumes the flag exactly once.
+		if (event.message.role === "user") {
+			const text = assistantText(event.message.content);
+			if (text && userRequestsVoice(text)) voiceRequested = true;
+		}
 		if (spuriousTurnPending && event.message.role === "assistant") {
 			spuriousTurnPending = false;
 			return {
