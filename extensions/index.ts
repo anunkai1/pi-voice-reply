@@ -16,10 +16,13 @@
  * and how to say it is agent logic. agentchatbox stays a transport layer.
  *
  * Why two variants via the session model: the user picks one model for the
- * conversation; using the same model for the rewrite means one auth path,
- * one bill, and quality that tracks the main reply. (A future
- * VOICE_REWRITE_MODEL override could route just the rewrite to a cheaper
- * model, but that's deliberately not wired yet — keep it simple.)
+ * conversation; by default the rewrite reuses that same model (one auth
+ * path, one bill). Set VOICE_REWRITE_MODEL="provider/modelId" (e.g.
+ * "google/gemini-2.5-flash") to route JUST the spoken rewrite to a faster /
+ * cheaper model — paraphrasing a reply for speech rewards speed over heavy
+ * reasoning, so a flash model plus thinking disabled turns a ~40s wait into
+ * a few seconds. Ignored (falls back to the session model) if the named
+ * model isn't in the registry or has no configured auth.
  */
 
 import type {
@@ -120,6 +123,36 @@ function assistantText(content: unknown): string {
 }
 
 /**
+ * Resolve the model for a spoken-rewrite pass.
+ *
+ * Defaults to the session's current model (ctx.model). If VOICE_REWRITE_MODEL
+ * is set ("provider/modelId"), prefer that model — but only if it resolves
+ * in the registry AND has configured auth; otherwise warn and fall back to
+ * the session model rather than failing the rewrite. See the file header
+ * for the rationale.
+ */
+function resolveRewriteModel(ctx: ExtensionContext): ExtensionContext["model"] {
+	const override = process.env.VOICE_REWRITE_MODEL?.trim();
+	if (override) {
+		const slash = override.indexOf("/");
+		if (slash <= 0 || slash === override.length - 1) {
+			console.warn(
+				`[pi-voice-reply] VOICE_REWRITE_MODEL must be "provider/modelId"; ignoring "${override}".`,
+			);
+		} else {
+			const provider = override.slice(0, slash);
+			const modelId = override.slice(slash + 1);
+			const m = ctx.modelRegistry.find(provider, modelId);
+			if (m && ctx.modelRegistry.hasConfiguredAuth(m)) return m;
+			console.warn(
+				`[pi-voice-reply] VOICE_REWRITE_MODEL "${override}" not found or unconfigured; falling back to session model.`,
+			);
+		}
+	}
+	return ctx.model;
+}
+
+/**
  * Run one rewrite pass via a throwaway in-memory sub-agent using the given
  * model and system prompt. Returns the spoken-text variant, or null if the
  * model couldn't be resolved or returned nothing useful.
@@ -133,7 +166,7 @@ async function rewriteForSpeech(
 	systemPrompt: string,
 	sourceText: string,
 ): Promise<string | null> {
-	const model = ctx.model;
+	const model = resolveRewriteModel(ctx);
 	if (!model) {
 		console.warn("[pi-voice-reply] no active model; skipping rewrite");
 		return null;
@@ -149,6 +182,11 @@ async function rewriteForSpeech(
 	const { session } = await createAgentSession({
 		model,
 		tools: [],
+		// Paraphrasing prose for speech needs no chain-of-thought; disable
+		// thinking entirely so the rewrite isn't billed for (and slowed by)
+		// reasoning tokens. Applies whether we fell back to ctx.model or used
+		// a VOICE_REWRITE_MODEL override.
+		thinkingLevel: "off",
 		sessionManager: SessionManager.inMemory(),
 		authStorage: AuthStorage.create(),
 		modelRegistry: ctx.modelRegistry,
