@@ -10,7 +10,6 @@
 import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
-
 // ── Voice-request detection ────────────────────────────────────────
 
 /**
@@ -119,4 +118,52 @@ export function logVoiceFailure(entry: {
 	} catch {
 		/* best-effort */
 	}
+}
+
+// ── Fallback reporting (pure decision logic) ───────────────────────
+
+/** One distinct model fallback that occurred during a voice reply. */
+export interface VoiceFallback {
+	provider: string;
+	modelId: string;
+	error: string;
+}
+
+/** Input shape for collectFallbacks — mirrors RewriteResult in index.ts
+ *  without pulling in the SDK/ExtensionContext type. */
+export type FallbackResult = { fallback?: VoiceFallback };
+
+/**
+ * Collect ALL distinct fallbacks from a long+short rewrite pair, not just
+ * the first. Long + short run in parallel and can each fall back (usually
+ * to the same override model). Dedup by `provider/modelId:error` so an
+ * identical pair yields one entry, while two genuinely different failures
+ * (e.g. a 429 then a 500) both survive instead of the second being silently
+ * dropped. Returns the distinct list, in first-seen order.
+ */
+export function collectFallbacks(results: FallbackResult[]): VoiceFallback[] {
+	const seen = new Set<string>();
+	const out: VoiceFallback[] = [];
+	for (const r of results) {
+		const fb = r.fallback;
+		if (!fb) continue;
+		const key = `${fb.provider}/${fb.modelId}:${fb.error}`;
+		if (seen.has(key)) continue;
+		seen.add(key);
+		out.push(fb);
+	}
+	return out;
+}
+
+/**
+ * Build a single user-facing notification string for N fallbacks. One toast
+ * summarizing all of them (don't spam N toasts for a pair that usually
+ * failed identically). `sessionLabel` is the human-readable model the voice
+ * rewrite fell back to (e.g. "minimax/MiniMax-M3").
+ */
+export function fallbackNotice(fallbacks: VoiceFallback[], sessionLabel: string): string {
+	const lines = fallbacks.map((fb) => `${fb.provider}/${fb.modelId} (${fb.error})`);
+	const tail = `used ${sessionLabel} instead. Log: ~/.pi/agent/voice-reply-failures.jsonl`;
+	if (fallbacks.length === 1) return `Voice model ${lines[0]} failed; ${tail}`;
+	return `${fallbacks.length} voice-model fallbacks (${lines.join("; ")}); ${tail}`;
 }

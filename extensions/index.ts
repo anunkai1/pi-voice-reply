@@ -37,7 +37,13 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { homedir } from "node:os";
 import { resolve } from "node:path";
-import { assistantText, logVoiceFailure, userRequestsVoice } from "./lib.js";
+import {
+	assistantText,
+	collectFallbacks,
+	fallbackNotice,
+	logVoiceFailure,
+	userRequestsVoice,
+} from "./lib.js";
 
 // ── Configuration ──────────────────────────────────────────────────
 
@@ -198,22 +204,26 @@ async function rewriteForSpeech(
  * record for deciding whether to keep VOICE_REWRITE_MODEL.
  */
 function reportFallbacks(ctx: ExtensionContext, results: RewriteResult[]): void {
-	const fb = results.find((r) => r.fallback)?.fallback;
-	if (!fb) return;
+	// Use the pure collector so ALL distinct fallbacks surface (was: only the
+	// first via .find(), silently dropping a second, different failure).
+	const fallbacks = collectFallbacks(results);
+	if (fallbacks.length === 0) return;
+
 	const sm = ctx.model as { provider?: string; modelId?: string; id?: string } | undefined;
 	const sessionLabel = sm ? modelLabel(sm) : "(session model)";
-	logVoiceFailure({
-		provider: fb.provider,
-		modelId: fb.modelId,
-		error: fb.error,
-		fellBackTo: sessionLabel,
-	});
-	if (ctx.ui?.notify) {
-		ctx.ui.notify(
-			`Voice model ${fb.provider}/${fb.modelId} failed (${fb.error}); used ${sessionLabel} instead. Log: ~/.pi/agent/voice-reply-failures.jsonl`,
-			"warning",
-		);
+
+	// Log each distinct failure to the durable record.
+	for (const fb of fallbacks) {
+		logVoiceFailure({
+			provider: fb.provider,
+			modelId: fb.modelId,
+			error: fb.error,
+			fellBackTo: sessionLabel,
+		});
 	}
+
+	// One notification summarizing all fallbacks.
+	ctx.ui?.notify(fallbackNotice(fallbacks, sessionLabel), "warning");
 }
 
 /**
