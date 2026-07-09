@@ -35,35 +35,19 @@ import {
 	DefaultResourceLoader,
 	SessionManager,
 } from "@earendil-works/pi-coding-agent";
-import { appendFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { resolve } from "node:path";
+import { assistantText, logVoiceFailure, userRequestsVoice } from "./lib.js";
 
 // ── Configuration ──────────────────────────────────────────────────
 
 /**
- * Phrases that trigger a voice reply. Matched case-insensitively as a
- * substring anywhere in the user's message. Kept deliberately broad — the
- * point is "any natural way the user asks for it works" rather than an
- * exhaustive list. The /voice command is the guaranteed explicit fallback.
+ * Phrases that trigger a voice reply. Kept deliberately broad — the point is
+ * "any natural way the user asks for it works". The /voice command is the
+ * guaranteed explicit fallback. (The list + word-boundary matcher live in
+ * ./lib.ts; the bare "in voice" entry was dropped as a false-positive
+ * source — "reply in voice" / "voice reply" cover the intent.)
  */
-const TRIGGER_PHRASES = [
-	"reply in voice",
-	"reply with voice",
-	"voice reply",
-	"in voice",
-	"say it back",
-	"say it out loud",
-	"read it back",
-	"read it aloud",
-	"read it out loud",
-	"read your reply aloud",
-	"talk to me",
-	"speak your answer",
-	"speak your reply",
-	"answer out loud",
-	"respond out loud",
-];
 
 /**
  * Long variant prompt. Keeps the substance of the reply but renders it as
@@ -103,25 +87,7 @@ const SHORT_PROMPT = [
 
 // ── Helpers ────────────────────────────────────────────────────────
 
-function userRequestsVoice(text: string): boolean {
-	const lower = text.toLowerCase();
-	return TRIGGER_PHRASES.some((p) => lower.includes(p));
-}
-
-/** Extract the text content blocks from a message's content (role-agnostic
- * — works on assistant replies AND user messages, including steered ones
- * whose content is the same [{type:"text",text}] shape). */
-function assistantText(content: unknown): string {
-	if (typeof content === "string") return content;
-	if (!Array.isArray(content)) return "";
-	return content
-		.filter(
-			// biome-ignore lint/suspicious/noExplicitAny: content part shape varies
-			(c: any) => c && typeof c === "object" && c.type === "text" && typeof c.text === "string",
-		)
-		.map((c: { text: string }) => c.text)
-		.join("\n");
-}
+// userRequestsVoice + assistantText moved to ./lib.ts (unit-tested there).
 
 /**
  * Resolve the model for a spoken-rewrite pass.
@@ -158,25 +124,7 @@ function modelLabel(m: { provider?: string; modelId?: string; id?: string }): st
 	return `${m.provider ?? "?"}/${m.modelId ?? m.id ?? "?"}`;
 }
 
-/**
- * Append a voice-model failure to the durable log so the operator can
- * inspect frequency and decide whether to keep VOICE_REWRITE_MODEL.
- * Path: ~/.pi/agent/voice-reply-failures.jsonl (one JSON object per line).
- * Best-effort — never throws.
- */
-function logVoiceFailure(entry: {
-	provider: string;
-	modelId: string;
-	error: string;
-	fellBackTo: string;
-}): void {
-	const logPath = resolve(homedir(), ".pi", "agent", "voice-reply-failures.jsonl");
-	try {
-		appendFileSync(logPath, JSON.stringify({ ts: new Date().toISOString(), ...entry }) + "\n");
-	} catch {
-		/* best-effort */
-	}
-}
+// logVoiceFailure moved to ./lib.ts (bounded log — trims past 256 KB).
 
 /** Result of a spoken-rewrite pass, including fallback metadata. */
 interface RewriteResult {

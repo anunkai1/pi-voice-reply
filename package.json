@@ -1,11 +1,20 @@
 {
   "name": "pi-voice-reply",
   "version": "0.1.0",
-  "description": "On-trigger spoken-summary voice replies for the pi coding agent. Emits long + short listenable variants of an assistant reply for agentchatbox to speak.",
-  "keywords": ["pi-package"],
+  "description": "On-trigger spoken-summary voice replies for the pi coding agent. Phrase triggers (e.g. \"reply in voice\") or /voice produce long+short listenable variants via the session model (or VOICE_REWRITE_MODEL override with auto-fallback).",
+  "keywords": ["pi-package", "voice", "tts", "voice-reply"],
   "type": "module",
   "pi": {
-    "extensions": ["./extensions"]
+    "extensions": ["./extensions/index.ts"]
   },
-  "dependencies": {}
+  "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "typescript": "^5.7.2",
+    "vitest": "^4.1.9"
+  }
 }

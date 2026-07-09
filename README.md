@@ -36,14 +36,19 @@ Then restart pi (or run `/reload`). The extension is global (all sessions).
 
 ## Trigger
 
-Any of these (matched case-insensitively as substrings anywhere in the user
-message) request a voice reply for the current turn:
+Any of these (matched case-insensitively as **word-boundary** phrases
+anywhere in the user message) request a voice reply for the current turn:
 
-- "reply in voice", "reply with voice", "voice reply", "in voice"
+- "reply in voice", "reply with voice", "voice reply"
 - "say it back", "say it out loud"
-- "read it back", "read it aloud", "read it out loud"
+- "read it back", "read it aloud", "read it out loud", "read your reply aloud"
 - "talk to me", "speak your answer", "speak your reply"
 - "answer out loud", "respond out loud"
+
+> The bare "in voice" entry was removed — it was the main false-positive
+> source (matched "I work in voice acting", "in voice chat"). The intent
+> is fully covered by "reply in voice" / "voice reply". Word boundaries
+> also prevent matches inside compound words.
 
 Or the explicit command: `/voice`.
 
@@ -77,6 +82,20 @@ but that's deliberately not wired yet — keep it simple.
 Clients recognize the custom message by `role === "custom"` and
 `customType === "voice-reply"`, then read `details.long` and `details.short`.
 agentchatbox renders each as a speak button that calls its existing TTS path.
+
+## Development
+
+```bash
+npm install
+npm test          # vitest — pure-helper unit tests (lib.ts)
+```
+
+The pure helpers (trigger detection, content extraction, the bounded
+failure log) live in [`extensions/lib.ts`](extensions/lib.ts) and are
+unit-tested in [`tests/lib.test.ts`](tests/lib.test.ts). Tool/command wiring
+and the model-rewrite orchestration stay in `extensions/index.ts` (exercised
+in production by `pi`, which provides the `@earendil-works/pi-coding-agent`
+types at load time).
 
 ## License
 
