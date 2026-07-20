@@ -350,6 +350,33 @@ async function runRewriteWithModel(
 // ── Extension entry point ──────────────────────────────────────────
 
 export default function (pi: ExtensionAPI) {
+	// ── SDK-surface guard ───────────────────────────────────────────
+	// A Jul 2026 pi upgrade removed `AuthStorage` from the package's public
+	// exports and silently broke EVERY voice reply — the throw was swallowed
+	// and resurfaced as the misleading "model produced no output". Guard the
+	// exports we now depend on (ModelRuntime / createAgentSession /
+	// SessionManager / DefaultResourceLoader); if a future upgrade renames or
+	// drops any of them, disable the extension with a clear in-chat warning
+	// that names the cause, instead of letting each button press die opaquely.
+	// The voice triggers become no-ops until the extension is updated to match.
+	const sdkOK =
+		typeof createAgentSession === "function" &&
+		typeof DefaultResourceLoader === "function" &&
+		typeof ModelRuntime?.create === "function" &&
+		typeof SessionManager?.inMemory === "function";
+	if (!sdkOK) {
+		pi.on("session_start", async (_event, ctx) => {
+			ctx.ui?.notify(
+				"pi-voice-reply disabled itself: this pi version removed/renamed an SDK export it needs " +
+					"(ModelRuntime / createAgentSession / SessionManager / DefaultResourceLoader). " +
+					"Voice buttons will do nothing until the extension is updated to match — " +
+					"see ~/.pi/agent/voice-reply-failures.jsonl.",
+				"warning",
+			);
+		});
+		return;
+	}
+
 	// Turn-level flag, set by the input handler when the user asks for voice.
 	let voiceRequested = false;
 	let currentCtx: ExtensionContext | undefined;
