@@ -4,13 +4,16 @@
  * When the user asks for a voice reply (e.g. "reply in voice", "say it
  * back", "/voice"), this extension waits for the agent's normal text reply
  * to finish, then asks the same model to rewrite that reply *for listening*
- * in two variants — a long listenable version and a short concise one —
- * and emits both as a custom `voice-reply` message.
+ * in three tiers — a long listenable version, a medium ~250-word summary,
+ * and a short 2–3 sentence gist — and emits them as a custom `voice-reply`
+ * message. Each variant is generated on demand (per button press), so the
+ * message carries only the variant(s) just produced; the client merges
+ * them onto the assistant message.
  *
- * agentchatbox (or any RPC/TUI client) renders that custom message as two
- * speak buttons. The actual audio synthesis happens wherever the client
- * sends the text (agentchatbox POSTs to its /api/tts → Kokoro); this
- * extension only produces the *words*.
+ * agentchatbox (or any RPC/TUI client) renders that custom message as
+ * Long/Med/Short speak buttons. The actual audio synthesis happens
+ * wherever the client sends the text (agentchatbox POSTs to its /api/tts
+ * → Kokoro); this extension only produces the *words*.
  *
  * Why it lives here (in pi, not in agentchatbox): deciding what to say
  * and how to say it is agent logic. agentchatbox stays a transport layer.
@@ -30,9 +33,9 @@ import type {
 	ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
 import {
-	AuthStorage,
 	createAgentSession,
 	DefaultResourceLoader,
+	ModelRuntime,
 	SessionManager,
 } from "@earendil-works/pi-coding-agent";
 import { homedir } from "node:os";
@@ -77,6 +80,25 @@ const LONG_PROMPT = [
 ].join("\n");
 
 /**
+ * Medium variant prompt. A spoken summary of at most 250 words — the main
+ * points and key conclusions with enough detail to be useful, but tighter
+ * than the long variant. Like long/short this is produced for listening,
+ * but the client ALSO renders it as readable text below the reply.
+ */
+const MEDIUM_PROMPT = [
+	"You are preparing an assistant's reply to be read aloud by a text-to-speech system.",
+	"The reply is enclosed in quadruple backticks. Summarize it in at most 250 words of natural spoken prose.",
+	"",
+	"Rules:",
+	"- Capture the main points and key conclusions with enough detail to be useful.",
+	"- Verbalize numbers, versions, and identifiers the way a person would say them.",
+	"- Replace any table with one sentence describing what it showed; skip code blocks (say what they do in one short phrase instead of reading the code).",
+	"- Drop emoji, markdown formatting, sigils, and bare URLs.",
+	"- Sound like a person explaining, not reading a document.",
+	"- Output ONLY the summary, nothing else. No preamble, no quotes.",
+].join("\n");
+
+/**
  * Short variant prompt. 2–3 sentences — just the conclusion plus any
  * essential number. The "give me the gist" path.
  */
@@ -90,6 +112,29 @@ const SHORT_PROMPT = [
 	"- Conversational and concise.",
 	"- Output ONLY the summary, nothing else. No preamble, no quotes.",
 ].join("\n");
+
+/**
+ * Variant → prompt map. Each spoken tier has its own rewrite prompt.
+ * /voice-last <variant> and the proactive path both index into this.
+ */
+const VARIANT_PROMPTS = {
+	long: LONG_PROMPT,
+	medium: MEDIUM_PROMPT,
+	short: SHORT_PROMPT,
+} as const;
+type VoiceVariant = keyof typeof VARIANT_PROMPTS;
+
+/**
+ * Parse a /voice-last arg into a known variant. Accepts long/medium/short
+ * (and short aliases m/s), case-insensitive. Unknown or empty → "long",
+ * matching the original default so a bare /voice-last still works.
+ */
+function parseVariant(args: string): VoiceVariant {
+	const v = (args ?? "").trim().toLowerCase();
+	if (v === "medium" || v === "med" || v === "m") return "medium";
+	if (v === "short" || v === "s") return "short";
+	return "long";
+}
 
 // ── Helpers ────────────────────────────────────────────────────────
 
@@ -227,6 +272,28 @@ function reportFallbacks(ctx: ExtensionContext, results: RewriteResult[]): void 
 }
 
 /**
+ * Lazily-built, cached ModelRuntime for ephemeral rewrite sessions.
+ *
+ * createAgentSession authenticates + resolves models through a ModelRuntime,
+ * but ExtensionContext only exposes a ModelRegistry (no runtime, authStorage,
+ * or agentDir). Building one fresh per button press would re-read models.json
+ * + auth.json every time, so cache it for the process lifetime. Reads the
+ * global ~/.pi agent dir — the same place the main session loads from.
+ *
+ * NOTE: this replaces an earlier `AuthStorage.create()` + `ctx.modelRegistry`
+ * pair. The Jul 2026 pi build dropped `AuthStorage` from the package's public
+ * exports, so `AuthStorage.create()` threw "Cannot read properties of
+ * undefined (reading 'create')" — which is what made every voice reply fail
+ * with "model produced no output" (the GLM-5.2 fallback hit the same error).
+ * `ModelRuntime` is the supported entry point and IS still exported.
+ */
+let cachedModelRuntime: Awaited<ReturnType<typeof ModelRuntime.create>> | undefined;
+async function getModelRuntime(): Promise<Awaited<ReturnType<typeof ModelRuntime.create>>> {
+	if (!cachedModelRuntime) cachedModelRuntime = await ModelRuntime.create({});
+	return cachedModelRuntime;
+}
+
+/**
  * Build an ephemeral rewrite session with a SPECIFIC model and run one
  * prompt through it. Throws on model error; returns null on empty output.
  * Extracted from rewriteForSpeech so the fallback orchestrator can call it
@@ -255,8 +322,10 @@ async function runRewriteWithModel(
 		// a VOICE_REWRITE_MODEL override.
 		thinkingLevel: "off",
 		sessionManager: SessionManager.inMemory(),
-		authStorage: AuthStorage.create(),
-		modelRegistry: ctx.modelRegistry,
+		// createAgentSession resolves auth + models through a ModelRuntime.
+		// ctx exposes only a ModelRegistry (no runtime/authStorage/agentDir),
+		// so pass a lazily-cached ModelRuntime built from the global ~/.pi dir.
+		modelRuntime: await getModelRuntime(),
 		resourceLoader: loader,
 	});
 
@@ -318,7 +387,11 @@ export default function (pi: ExtensionAPI) {
 	 */
 	const emitVoiceReply = (
 		ctx: ExtensionContext | undefined,
-		details: { long: string; short: string },
+		// Partial by design: /voice-last <variant> emits ONE variant at a
+		// time, so only the generated key is present. The client merges it
+		// onto the assistant message without clearing previously-generated
+		// variants. The proactive keyword path emits just { long }.
+		details: { long?: string; medium?: string; short?: string },
 	): void => {
 		const fire = (): void => {
 			spuriousTurnPending = true;
@@ -455,19 +528,21 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	/**
-	 * /voice-last — retroactive voice reply. Rewrites the most recent
-	 * assistant message in the session (regardless of when it was
-	 * produced) into long + short spoken variants and emits the same
-	 * voice-reply custom message the proactive path emits. This is what
-	 * the browser's per-message 🎫 button calls: press it after reading
-	 * a reply to hear a listenable version, no trigger phrase needed.
+	 * /voice-last [variant] — retroactive voice reply. Rewrites the most
+	 * recent assistant message in the session (regardless of when it was
+	 * produced) into ONE spoken variant — long | medium | short (default
+	 * long) — and emits a voice-reply custom message carrying just that
+	 * variant. The client merges it onto the assistant message so multiple
+	 * presses (e.g. medium then short) accumulate without regeneration.
 	 *
-	 * Reads the last assistant text straight from the session branch
-	 * (no cache), so it's always accurate even across reloads.
+	 * This is what the browser's per-message LongTTS/MedTTS/ShortTTS buttons
+	 * call: each press generates exactly the tier it asked for, not all
+	 * three at once. Reads the last assistant text straight from the session
+	 * branch (no cache), so it's always accurate even across reloads.
 	 */
 	pi.registerCommand("voice-last", {
-		description: "Generate a spoken voice reply for the most recent assistant message",
-		handler: async (_args, ctx) => {
+		description: "Generate a spoken voice reply (long|medium|short, default long) for the most recent assistant message",
+		handler: async (args, ctx) => {
 			// Find the last assistant message in the session branch.
 			const entries = ctx.sessionManager.getBranch();
 			let lastText = "";
@@ -489,18 +564,21 @@ export default function (pi: ExtensionAPI) {
 
 			if (ctx.ui?.setStatus) ctx.ui.setStatus("voice-reply", "preparing voice reply…");
 			try {
-				const [longR, shortR] = await Promise.all([
-					rewriteForSpeech(ctx, LONG_PROMPT, lastText),
-					rewriteForSpeech(ctx, SHORT_PROMPT, lastText),
-				]);
-				reportFallbacks(ctx, [longR, shortR]);
-				const long = longR.text;
-				const short = shortR.text;
-				if (!long && !short) {
+				const variant = parseVariant(args);
+				const result = await rewriteForSpeech(
+					ctx,
+					VARIANT_PROMPTS[variant],
+					lastText,
+				);
+				reportFallbacks(ctx, [result]);
+				const text = result.text;
+				if (!text) {
 					if (ctx.ui?.notify) ctx.ui.notify("Voice reply: model produced no output.", "warning");
 					return;
 				}
-				emitVoiceReply(ctx, { long: long ?? "", short: short ?? "" });
+				// Emit only the requested variant; the client merges it onto
+				// the assistant message alongside any already-generated ones.
+				emitVoiceReply(ctx, { [variant]: text });
 			} catch (err) {
 				console.warn("[pi-voice-reply] retroactive rewrite failed:", err);
 				if (ctx.ui?.notify) {
@@ -516,8 +594,9 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	/**
-	 * agent_end: the full reply is in. If voice was requested, fire two
-	 * parallel rewrite passes and emit the result as a custom message.
+	 * agent_end: the full reply is in. If voice was requested, fire a
+	 * single long-variant rewrite pass and emit it as a custom message.
+	 * Medium/short are generated on demand by their own buttons.
 	 */
 	pi.on("agent_end", async (event, ctx) => {
 		currentCtx = ctx;
@@ -543,15 +622,15 @@ export default function (pi: ExtensionAPI) {
 		}
 
 		try {
-			const [longR, shortR] = await Promise.all([
-				rewriteForSpeech(ctx, LONG_PROMPT, lastAssistantText),
-				rewriteForSpeech(ctx, SHORT_PROMPT, lastAssistantText),
-			]);
-			reportFallbacks(ctx, [longR, shortR]);
+			// Per-variant generation: the proactive keyword trigger defaults to
+			// the long variant (what LongTTS does). Medium/short are generated
+			// on demand by their own buttons via /voice-last, so we don't pay
+			// for them here.
+			const longR = await rewriteForSpeech(ctx, LONG_PROMPT, lastAssistantText);
+			reportFallbacks(ctx, [longR]);
 			const long = longR.text;
-			const short = shortR.text;
 
-			if (!long && !short) {
+			if (!long) {
 				if (ctx.ui?.notify) {
 					ctx.ui.notify("Voice reply: model produced no output.", "warning");
 				}
@@ -559,10 +638,11 @@ export default function (pi: ExtensionAPI) {
 			}
 
 			// Emit the voice-reply custom message. agentchatbox recognizes
-			// customType "voice-reply" and renders the long/short speak
-			// buttons; other clients ignore it. Deferred until idle so it
-			// doesn't trigger a spurious continuation turn — see emitVoiceReply.
-			emitVoiceReply(ctx, { long: long ?? "", short: short ?? "" });
+			// customType "voice-reply" and merges the variants onto the last
+			// assistant message, rendering the Long/Med/Short speak buttons;
+			// other clients ignore it. Deferred until idle so it doesn't
+			// trigger a spurious continuation turn — see emitVoiceReply.
+			emitVoiceReply(ctx, { long: long ?? "" });
 		} catch (err) {
 			console.warn("[pi-voice-reply] rewrite failed:", err);
 			if (ctx.ui?.notify) {
