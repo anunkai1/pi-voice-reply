@@ -45,6 +45,8 @@ import {
 	collectFallbacks,
 	fallbackNotice,
 	logVoiceFailure,
+	parseVoiceLastArgs,
+	pickVoiceSource,
 	userRequestsVoice,
 } from "./lib.js";
 
@@ -124,17 +126,8 @@ const VARIANT_PROMPTS = {
 } as const;
 type VoiceVariant = keyof typeof VARIANT_PROMPTS;
 
-/**
- * Parse a /voice-last arg into a known variant. Accepts long/medium/short
- * (and short aliases m/s), case-insensitive. Unknown or empty → "long",
- * matching the original default so a bare /voice-last still works.
- */
-function parseVariant(args: string): VoiceVariant {
-	const v = (args ?? "").trim().toLowerCase();
-	if (v === "medium" || v === "med" || v === "m") return "medium";
-	if (v === "short" || v === "s") return "short";
-	return "long";
-}
+// /voice-last argument parsing (variant + optional --match hint) and the
+// reply-selection logic live in ./lib.ts, unit-tested there.
 
 // ── Helpers ────────────────────────────────────────────────────────
 
@@ -418,7 +411,9 @@ export default function (pi: ExtensionAPI) {
 		// time, so only the generated key is present. The client merges it
 		// onto the assistant message without clearing previously-generated
 		// variants. The proactive keyword path emits just { long }.
-		details: { long?: string; medium?: string; short?: string },
+		// `match` echoes the --match hint that picked the source reply, so the
+		// client merges the variant onto THAT message rather than the newest one.
+		details: { long?: string; medium?: string; short?: string; match?: string },
 	): void => {
 		const fire = (): void => {
 			spuriousTurnPending = true;
@@ -555,35 +550,37 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	/**
-	 * /voice-last [variant] — retroactive voice reply. Rewrites the most
-	 * recent assistant message in the session (regardless of when it was
-	 * produced) into ONE spoken variant — long | medium | short (default
-	 * long) — and emits a voice-reply custom message carrying just that
+	 * /voice-last [variant] [--match "<hint>"] — retroactive voice reply. Rewrites
+	 * an assistant message into ONE spoken variant — long | medium | short
+	 * (default long) — and emits a voice-reply custom message carrying just that
 	 * variant. The client merges it onto the assistant message so multiple
 	 * presses (e.g. medium then short) accumulate without regeneration.
 	 *
 	 * This is what the browser's per-message LongTTS/MedTTS/ShortTTS buttons
-	 * call: each press generates exactly the tier it asked for, not all
-	 * three at once. Reads the last assistant text straight from the session
-	 * branch (no cache), so it's always accurate even across reloads.
+	 * call: each press generates exactly the tier it asked for, not all three at
+	 * once. Reads the assistant text straight from the session branch (no
+	 * cache), so it's always accurate even across reloads.
+	 *
+	 * Without a hint it voices the most recent reply, as it always did. The
+	 * browser adds --match "<opening words>" when the press came from an older
+	 * row: the hint selects that reply, and is echoed in `details.match` so the
+	 * client shows the text under the row whose button was pressed instead of
+	 * the newest one.
 	 */
 	pi.registerCommand("voice-last", {
-		description: "Generate a spoken voice reply (long|medium|short, default long) for the most recent assistant message",
+		description:
+			"Generate a spoken voice reply (long|medium|short, default long) for the most recent assistant message, or for the reply named by --match",
 		handler: async (args, ctx) => {
-			// Find the last assistant message in the session branch.
+			const { variant, match } = parseVoiceLastArgs(args);
+			// Session-branch messages, in order, for pickVoiceSource().
 			const entries = ctx.sessionManager.getBranch();
-			let lastText = "";
-			for (let i = entries.length - 1; i >= 0; i--) {
-				const entry = entries[i];
+			const messages = [];
+			for (const entry of entries) {
 				// biome-ignore lint/suspicious/noExplicitAny: entry union is wide
-				if (entry && (entry as any).type === "message") {
-					const msg = (entry as any).message;
-					if (msg && msg.role === "assistant") {
-						lastText = assistantText(msg.content);
-						if (lastText.trim()) break;
-					}
-				}
+				if (entry && (entry as any).type === "message") messages.push((entry as any).message);
 			}
+			const picked = pickVoiceSource(messages, match);
+			const lastText = picked.text;
 			if (!lastText.trim()) {
 				ctx.ui.notify("No assistant message to voice yet.", "warning");
 				return;
@@ -591,7 +588,6 @@ export default function (pi: ExtensionAPI) {
 
 			if (ctx.ui?.setStatus) ctx.ui.setStatus("voice-reply", "preparing voice reply…");
 			try {
-				const variant = parseVariant(args);
 				const result = await rewriteForSpeech(
 					ctx,
 					VARIANT_PROMPTS[variant],
@@ -605,7 +601,12 @@ export default function (pi: ExtensionAPI) {
 				}
 				// Emit only the requested variant; the client merges it onto
 				// the assistant message alongside any already-generated ones.
-				emitVoiceReply(ctx, { [variant]: text });
+				// `match` (only when the hint actually selected the reply) tells
+				// the client which message that is.
+				emitVoiceReply(ctx, {
+					[variant]: text,
+					...(picked.matched && match ? { match } : {}),
+				});
 			} catch (err) {
 				console.warn("[pi-voice-reply] retroactive rewrite failed:", err);
 				if (ctx.ui?.notify) {

@@ -167,3 +167,85 @@ export function fallbackNotice(fallbacks: VoiceFallback[], sessionLabel: string)
 	if (fallbacks.length === 1) return `Voice model ${lines[0]} failed; ${tail}`;
 	return `${fallbacks.length} voice-model fallbacks (${lines.join("; ")}); ${tail}`;
 }
+
+// ── /voice-last targeting ──────────────────────────────────────────
+
+export type VoiceVariant = "long" | "medium" | "short";
+
+/**
+ * Collapse runs of whitespace. Hints travel from rendered text (which the
+ * browser wraps, and which markdown rendering reflows) back to the raw session
+ * text, so both sides compare whitespace-normalised strings.
+ */
+export function normaliseWhitespace(text: string): string {
+	return text.replace(/\s+/g, " ").trim();
+}
+
+/**
+ * Parse the /voice-last argument list — the variant, plus an optional
+ * `--match "<hint>"` naming WHICH reply to voice.
+ *
+ * The hint exists because /voice-last used to always voice the most recent
+ * reply. Pressing the Short button on an older message therefore summarised the
+ * newest one, and the client (merging variants onto the newest message) showed
+ * the text under the newest row — nothing appeared where the button was
+ * pressed. The browser now sends the pressed reply's opening words, and echoes
+ * the hint back on the emitted variant so the client can merge it onto the same
+ * message it was generated from.
+ *
+ * The variant is read from the text BEFORE --match, so a hint containing the
+ * word "short" can't change which tier is generated. Unknown or empty variant →
+ * "long" (the original default, so a bare /voice-last still works); an absent
+ * or unparsable hint → "" (voice the most recent reply, as before).
+ */
+export function parseVoiceLastArgs(args: string): { variant: VoiceVariant; match: string } {
+	const raw = (args ?? "").trim();
+	// Split on the flag itself rather than only on a flag WITH a value, so a
+	// trailing `--match` (no hint) still leaves the variant readable.
+	const flag = raw.search(/--match\b/);
+	const head = (flag >= 0 ? raw.slice(0, flag) : raw).trim().toLowerCase();
+	const hint = /--match\s+(?:"([^"]*)"|(\S+))/.exec(raw);
+	const match = normaliseWhitespace(hint?.[1] ?? hint?.[2] ?? "");
+	const variant: VoiceVariant =
+		head === "medium" || head === "med" || head === "m"
+			? "medium"
+			: head === "short" || head === "s"
+				? "short"
+				: "long";
+	return { variant, match };
+}
+
+/** The slice of a session-branch message pickVoiceSource() needs. */
+export interface BranchMessageLike {
+	role?: string;
+	content?: unknown;
+}
+
+/**
+ * Choose the reply text to voice, preferring the message a hint names.
+ *
+ * `messages` is in session order. With a hint, the NEWEST assistant message
+ * whose text starts with it wins, and `matched` says whether that happened —
+ * the caller echoes it so the client merges the variant onto the same message.
+ * Without a hint, or when nothing matches, this is the newest assistant message
+ * with text (the original behaviour), with `matched: false`.
+ */
+export function pickVoiceSource(
+	messages: BranchMessageLike[],
+	match = "",
+): { text: string; matched: boolean } {
+	const want = normaliseWhitespace(match).toLowerCase();
+	let newest = "";
+	for (let i = messages.length - 1; i >= 0; i--) {
+		const msg = messages[i];
+		if (!msg || msg.role !== "assistant") continue;
+		const text = assistantText(msg.content);
+		if (!text.trim()) continue;
+		if (!newest) newest = text;
+		if (!want) return { text, matched: false };
+		if (normaliseWhitespace(text).toLowerCase().startsWith(want)) {
+			return { text, matched: true };
+		}
+	}
+	return { text: newest, matched: false };
+}

@@ -13,7 +13,15 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { assistantText, collectFallbacks, fallbackNotice, logVoiceFailure, userRequestsVoice } from "../extensions/lib.js";
+import {
+	assistantText,
+	collectFallbacks,
+	fallbackNotice,
+	logVoiceFailure,
+	parseVoiceLastArgs,
+	pickVoiceSource,
+	userRequestsVoice,
+} from "../extensions/lib.js";
 
 // ── userRequestsVoice ──────────────────────────────────────────────
 
@@ -222,5 +230,95 @@ describe("fallbackNotice", () => {
 		expect(msg).toBe(
 			"2 voice-model fallbacks (venice/gemini-3-flash (429); venice/gemini-3-flash (500)); used minimax/MiniMax-M3 instead. Log: ~/.pi/agent/voice-reply-failures.jsonl",
 		);
+	});
+});
+
+// ── parseVoiceLastArgs ─────────────────────────────────────────────
+
+describe("parseVoiceLastArgs", () => {
+	it("keeps the original bare-variant behaviour", () => {
+		expect(parseVoiceLastArgs("long")).toEqual({ variant: "long", match: "" });
+		expect(parseVoiceLastArgs("medium")).toEqual({ variant: "medium", match: "" });
+		expect(parseVoiceLastArgs("med")).toEqual({ variant: "medium", match: "" });
+		expect(parseVoiceLastArgs("m")).toEqual({ variant: "medium", match: "" });
+		expect(parseVoiceLastArgs("short")).toEqual({ variant: "short", match: "" });
+		expect(parseVoiceLastArgs("s")).toEqual({ variant: "short", match: "" });
+		expect(parseVoiceLastArgs("SHORT")).toEqual({ variant: "short", match: "" });
+	});
+
+	it("defaults to long for unknown or empty args", () => {
+		expect(parseVoiceLastArgs("")).toMatchObject({ variant: "long" });
+		expect(parseVoiceLastArgs("banana")).toMatchObject({ variant: "long" });
+	});
+
+	it("parses a quoted --match hint and collapses its whitespace", () => {
+		expect(parseVoiceLastArgs('short --match "Lappy is fully   done\nwith it"')).toEqual({
+			variant: "short",
+			match: "Lappy is fully done with it",
+		});
+	});
+
+	it("ignores a variant word that appears inside the hint", () => {
+		// The variant must come from before --match, or a hint mentioning
+		// "short" would silently switch tiers.
+		expect(parseVoiceLastArgs('long --match "the short version of this"')).toEqual({
+			variant: "long",
+			match: "the short version of this",
+		});
+	});
+
+	it("handles an unquoted hint and a missing hint", () => {
+		expect(parseVoiceLastArgs("medium --match Lappy")).toEqual({ variant: "medium", match: "Lappy" });
+		expect(parseVoiceLastArgs("medium --match")).toEqual({ variant: "medium", match: "" });
+	});
+});
+
+// ── pickVoiceSource ────────────────────────────────────────────────
+
+describe("pickVoiceSource", () => {
+	const msg = (role: string, text: string) => ({ role, content: [{ type: "text", text }] });
+	const branch = [
+		msg("user", "first question"),
+		msg("assistant", "First reply about deploys."),
+		msg("user", "second question"),
+		msg("assistant", "Second reply about audio."),
+	];
+
+	it("returns the newest assistant reply when there is no hint", () => {
+		expect(pickVoiceSource(branch)).toEqual({ text: "Second reply about audio.", matched: false });
+	});
+
+	it("honours a hint that names an older reply", () => {
+		expect(pickVoiceSource(branch, "First reply")).toEqual({
+			text: "First reply about deploys.",
+			matched: true,
+		});
+	});
+
+	it("is whitespace- and case-insensitive, like the hint the browser sends", () => {
+		expect(pickVoiceSource(branch, "second   reply about")).toEqual({
+			text: "Second reply about audio.",
+			matched: true,
+		});
+	});
+
+	it("falls back to the newest reply when the hint matches nothing", () => {
+		expect(pickVoiceSource(branch, "a reply that is not here")).toEqual({
+			text: "Second reply about audio.",
+			matched: false,
+		});
+	});
+
+	it("skips assistant messages with no text (tool-call-only turns)", () => {
+		const withEmpty = [
+			msg("assistant", "Real reply."),
+			{ role: "assistant", content: [{ type: "toolCall", name: "read" }] },
+		];
+		expect(pickVoiceSource(withEmpty)).toEqual({ text: "Real reply.", matched: false });
+		expect(pickVoiceSource(withEmpty, "Real")).toMatchObject({ matched: true });
+	});
+
+	it("returns empty text when there is no assistant reply at all", () => {
+		expect(pickVoiceSource([msg("user", "hello")])).toEqual({ text: "", matched: false });
 	});
 });
