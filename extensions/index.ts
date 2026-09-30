@@ -44,6 +44,7 @@ import {
 	assistantText,
 	collectFallbacks,
 	fallbackNotice,
+	keepInModelContext,
 	logVoiceFailure,
 	parseVoiceLastArgs,
 	pickVoiceSource,
@@ -457,10 +458,8 @@ export default function (pi: ExtensionAPI) {
 	 * message's content ("voice reply ready") leaks into the prompt.
 	 */
 	pi.on("context", async (event) => {
-		const filtered = event.messages.filter(
-			// biome-ignore lint/suspicious/noExplicitAny: AgentMessage union is wide
-			(m: any) => !(m.role === "custom"),
-		);
+		// biome-ignore lint/suspicious/noExplicitAny: AgentMessage union is wide
+		const filtered = event.messages.filter((m: any) => keepInModelContext(m));
 		if (filtered.length === event.messages.length) return;
 		return { messages: filtered };
 	});

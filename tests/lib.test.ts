@@ -14,6 +14,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
+	keepInModelContext,
 	assistantText,
 	collectFallbacks,
 	fallbackNotice,
@@ -320,5 +321,26 @@ describe("pickVoiceSource", () => {
 
 	it("returns empty text when there is no assistant reply at all", () => {
 		expect(pickVoiceSource([msg("user", "hello")])).toEqual({ text: "", matched: false });
+	});
+});
+
+describe("keepInModelContext", () => {
+	it("keeps ordinary conversation messages", () => {
+		expect(keepInModelContext({ role: "user" })).toBe(true);
+		expect(keepInModelContext({ role: "assistant" })).toBe(true);
+		expect(keepInModelContext({ role: "toolResult" })).toBe(true);
+	});
+
+	it("strips display-only custom messages, including voice replies", () => {
+		expect(keepInModelContext({ role: "custom", customType: "voice-reply" })).toBe(false);
+		expect(keepInModelContext({ role: "custom", customType: "note" })).toBe(false);
+		expect(keepInModelContext({ role: "custom", customType: "note", details: { source: "other" } })).toBe(false);
+	});
+
+	it("keeps the claude-delegate prompt and reply notes", () => {
+		expect(keepInModelContext({ role: "custom", customType: "claude-prompt" })).toBe(true);
+		expect(
+			keepInModelContext({ role: "custom", customType: "note", details: { source: "claude-delegate" } }),
+		).toBe(true);
 	});
 });

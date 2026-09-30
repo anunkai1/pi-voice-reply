@@ -249,3 +249,23 @@ export function pickVoiceSource(
 	}
 	return { text: newest, matched: false };
 }
+
+/**
+ * True for the custom messages that must stay in the model's context. Every
+ * other custom message is a display-only note for the browser and is stripped
+ * before each LLM call. The claude-delegate extension is the exception: its
+ * prompt and reply notes record what Claude Code did in the chat, and it
+ * reshapes them in its own context hook, so they must survive this filter.
+ */
+export function keepInModelContext(message: {
+	role?: string;
+	customType?: string;
+	details?: unknown;
+}): boolean {
+	if (message.role !== "custom") return true;
+	if (message.customType === "claude-prompt") return true;
+	return (
+		message.customType === "note" &&
+		(message.details as { source?: unknown } | undefined)?.source === "claude-delegate"
+	);
+}
