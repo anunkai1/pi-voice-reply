@@ -174,6 +174,8 @@ function modelLabel(m: { provider?: string; modelId?: string; id?: string }): st
 /** Result of a spoken-rewrite pass, including fallback metadata. */
 interface RewriteResult {
 	text: string | null;
+	/** Why the final attempt produced nothing, when the model or API said. */
+	error?: string;
 	/** Present when the preferred (override) model failed and we fell back. */
 	fallback?: { provider: string; modelId: string; error: string };
 }
@@ -210,7 +212,7 @@ async function rewriteForSpeech(
 			return { text: await runRewriteWithModel(ctx, systemPrompt, sourceText, preferred) };
 		} catch (err) {
 			console.warn("[pi-voice-reply] rewrite failed (no fallback):", err);
-			return { text: null };
+			return { text: null, error: err instanceof Error ? err.message : String(err) };
 		}
 	}
 
@@ -232,7 +234,11 @@ async function rewriteForSpeech(
 			return { text, fallback: { provider, modelId, error } };
 		} catch (err2) {
 			console.warn("[pi-voice-reply] session-model fallback also failed:", err2);
-			return { text: null, fallback: { provider, modelId, error } };
+			return {
+				text: null,
+				error: err2 instanceof Error ? err2.message : String(err2),
+				fallback: { provider, modelId, error },
+			};
 		}
 	}
 }
@@ -327,14 +333,20 @@ async function runRewriteWithModel(
 		const userMessage =
 			`The assistant's reply to rewrite for speech:\n\n\`\`\`\`${sourceText}\n\`\`\`\``;
 		let out = "";
+		// A failed provider call ends the turn with stopReason "error" and no
+		// text; keep its message so the failure is not reported as "no output".
+		let providerError = "";
 		const unsub = session.subscribe((event) => {
 			if (event.type === "message_end" && event.message.role === "assistant") {
 				out += assistantText(event.message.content);
+				const m = event.message as { stopReason?: string; errorMessage?: string };
+				if (m.stopReason === "error" && m.errorMessage) providerError = m.errorMessage;
 			}
 		});
 		await session.prompt(userMessage);
 		unsub();
 		const cleaned = out.trim();
+		if (!cleaned && providerError) throw new Error(providerError);
 		return cleaned || null;
 	} finally {
 		session.dispose();
@@ -595,7 +607,9 @@ export default function (pi: ExtensionAPI) {
 				reportFallbacks(ctx, [result]);
 				const text = result.text;
 				if (!text) {
-					if (ctx.ui?.notify) ctx.ui.notify("Voice reply: model produced no output.", "warning");
+					if (ctx.ui?.notify) {
+						ctx.ui.notify(`Voice reply: ${result.error ?? "model produced no output"}.`, "warning");
+					}
 					return;
 				}
 				// Emit only the requested variant; the client merges it onto
@@ -659,7 +673,7 @@ export default function (pi: ExtensionAPI) {
 
 			if (!long) {
 				if (ctx.ui?.notify) {
-					ctx.ui.notify("Voice reply: model produced no output.", "warning");
+					ctx.ui.notify(`Voice reply: ${longR.error ?? "model produced no output"}.`, "warning");
 				}
 				return;
 			}
