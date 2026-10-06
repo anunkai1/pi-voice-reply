@@ -41,7 +41,6 @@ import { homedir } from "node:os";
 import { resolve } from "node:path";
 import {
 	assistantText,
-	collectFallbacks,
 	fallbackNotice,
 	keepInModelContext,
 	logVoiceFailure,
@@ -178,7 +177,7 @@ interface RewriteResult {
  * key EXISTS, not that the quota is alive — free-tier limits are discovered
  * only when the call fails. On failure, retries once with ctx.model (which
  * definitely works — the main reply just used it). Returns the text plus
- * fallback metadata so the caller logs + notifies once per voice reply.
+ * fallback metadata so the caller logs + notifies.
  */
 async function rewriteForSpeech(
 	ctx: ExtensionContext,
@@ -234,31 +233,24 @@ async function rewriteForSpeech(
 }
 
 /**
- * After a long+short pair, if EITHER fell back, log + notify ONCE (not per
- * variant). The notify surfaces in the browser; the log file is the durable
- * record for deciding whether to keep VOICE_REWRITE_MODEL.
+ * If the rewrite fell back to the session model, log it and notify. The
+ * notification surfaces in the browser; the log file is the durable record for
+ * deciding whether to keep VOICE_REWRITE_MODEL.
  */
-function reportFallbacks(ctx: ExtensionContext, results: RewriteResult[]): void {
-	// Use the pure collector so ALL distinct fallbacks surface (was: only the
-	// first via .find(), silently dropping a second, different failure).
-	const fallbacks = collectFallbacks(results);
-	if (fallbacks.length === 0) return;
+function reportFallback(ctx: ExtensionContext, result: RewriteResult): void {
+	const fb = result.fallback;
+	if (!fb) return;
 
 	const sm = ctx.model as { provider?: string; modelId?: string; id?: string } | undefined;
 	const sessionLabel = sm ? modelLabel(sm) : "(session model)";
 
-	// Log each distinct failure to the durable record.
-	for (const fb of fallbacks) {
-		logVoiceFailure({
-			provider: fb.provider,
-			modelId: fb.modelId,
-			error: fb.error,
-			fellBackTo: sessionLabel,
-		});
-	}
-
-	// One notification summarizing all fallbacks.
-	ctx.ui?.notify(fallbackNotice(fallbacks, sessionLabel), "warning");
+	logVoiceFailure({
+		provider: fb.provider,
+		modelId: fb.modelId,
+		error: fb.error,
+		fellBackTo: sessionLabel,
+	});
+	ctx.ui?.notify(fallbackNotice(fb, sessionLabel), "warning");
 }
 
 /**
@@ -552,7 +544,7 @@ export default function (pi: ExtensionAPI) {
 					VARIANT_PROMPTS[variant],
 					lastText,
 				);
-				reportFallbacks(ctx, [result]);
+				reportFallback(ctx, result);
 				const text = result.text;
 				if (!text) {
 					if (ctx.ui?.notify) {

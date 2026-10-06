@@ -58,9 +58,11 @@ the reply that starts with those words. There are no trigger phrases and no
 
 One auth path, one bill, and quality that tracks the main reply. A big frontier
 model writes a much better spoken summary than a small local model. The trade
-is latency + cost on triggered turns (two extra LLM calls); a future
-`VOICE_REWRITE_MODEL` override could route just the rewrite to a cheaper model,
-but that's deliberately not wired yet — keep it simple.
+is latency + cost on triggered turns (one extra LLM call per variant). Set
+`VOICE_REWRITE_MODEL="provider/modelId"` to route just the rewrite to a faster
+or cheaper model; if that model fails (quota, auth, revoked key), the rewrite
+falls back to the session model, shows a warning and logs the failure to
+`~/.pi/agent/voice-reply-failures.jsonl`.
 
 ## Client integration
 

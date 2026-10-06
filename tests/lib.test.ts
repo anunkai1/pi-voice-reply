@@ -16,7 +16,6 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
 	keepInModelContext,
 	assistantText,
-	collectFallbacks,
 	fallbackNotice,
 	logVoiceFailure,
 	parseVoiceLastArgs,
@@ -122,74 +121,16 @@ describe("logVoiceFailure", () => {
 	});
 });
 
-// ── collectFallbacks + fallbackNotice ───────────────────────────────
-
-describe("collectFallbacks", () => {
-	const fb = (provider: string, modelId: string, error: string) => ({
-		fallback: { provider, modelId, error },
-	});
-
-	it("returns [] when no result has a fallback", () => {
-		expect(collectFallbacks([{}, {}])).toEqual([]);
-		expect(collectFallbacks([{ fallback: undefined }])).toEqual([]);
-	});
-
-	it("returns the single fallback when only one occurred", () => {
-		expect(collectFallbacks([{}, fb("venice", "gemini-3-flash", "429")])).toEqual([
-			{ provider: "venice", modelId: "gemini-3-flash", error: "429" },
-		]);
-	});
-
-	it("collects BOTH fallbacks when long + short fall back with DIFFERENT errors", () => {
-		// The bug this guards: previously .find() returned only the first, so the
-		// second distinct failure was silently dropped from the log + toast.
-		const out = collectFallbacks([
-			fb("venice", "gemini-3-flash", "429"),
-			fb("venice", "gemini-3-flash", "500"),
-		]);
-		expect(out.map((f) => f.error)).toEqual(["429", "500"]);
-	});
-
-	it("dedups an identical pair (same model + same error) to one entry", () => {
-		// Long + short usually hit the exact same override failure — don't
-		// double-log/double-notify it.
-		const out = collectFallbacks([
-			fb("venice", "gemini-3-flash", "429"),
-			fb("venice", "gemini-3-flash", "429"),
-		]);
-		expect(out).toHaveLength(1);
-	});
-
-	it("keeps first-seen order", () => {
-		const out = collectFallbacks([
-			fb("zai", "glm-5-turbo", "quota"),
-			fb("venice", "gemini-3-flash", "429"),
-		]);
-		expect(out.map((f) => f.provider)).toEqual(["zai", "venice"]);
-	});
-});
+// ── fallbackNotice ──────────────────────────────────────
 
 describe("fallbackNotice", () => {
-	it("builds a single-fallback message in the original shape", () => {
+	it("builds the fallback message", () => {
 		const msg = fallbackNotice(
-			[{ provider: "venice", modelId: "gemini-3-flash", error: "429" }],
+			{ provider: "venice", modelId: "gemini-3-flash", error: "429" },
 			"minimax/MiniMax-M3",
 		);
 		expect(msg).toBe(
 			"Voice model venice/gemini-3-flash (429) failed; used minimax/MiniMax-M3 instead. Log: ~/.pi/agent/voice-reply-failures.jsonl",
-		);
-	});
-
-	it("lists all distinct fallbacks in a multi-failure message", () => {
-		const msg = fallbackNotice(
-			[
-				{ provider: "venice", modelId: "gemini-3-flash", error: "429" },
-				{ provider: "venice", modelId: "gemini-3-flash", error: "500" },
-			],
-			"minimax/MiniMax-M3",
-		);
-		expect(msg).toBe(
-			"2 voice-model fallbacks (venice/gemini-3-flash (429); venice/gemini-3-flash (500)); used minimax/MiniMax-M3 instead. Log: ~/.pi/agent/voice-reply-failures.jsonl",
 		);
 	});
 });
