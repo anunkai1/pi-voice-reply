@@ -1,5 +1,5 @@
 /**
- * Pure helpers for pi-voice-reply — trigger detection and content extraction,
+ * Pure helpers for pi-voice-reply — content extraction and reply selection,
  * split out of index.ts so they can be unit-tested without standing up the
  * pi session machinery (createAgentSession / SessionManager / model calls).
  *
@@ -10,54 +10,6 @@
 import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
-// ── Voice-request detection ────────────────────────────────────────
-
-/**
- * Phrases that trigger a voice reply. Kept deliberately broad — the point is
- * "any natural way the user asks for it works" rather than an exhaustive
- * list. The /voice command is the guaranteed explicit fallback.
- *
- * NOTE: the bare "in voice" was removed — it was the single biggest
- * false-positive source (matched "I work in voice acting", "in voice chat",
- * "in voice-over"). The real intent is fully covered by "reply in voice",
- * "reply with voice", and "voice reply" below.
- */
-export const TRIGGER_PHRASES = [
-	"reply in voice",
-	"reply with voice",
-	"voice reply",
-	"say it back",
-	"say it out loud",
-	"read it back",
-	"read it aloud",
-	"read it out loud",
-	"read your reply aloud",
-	"talk to me",
-	"speak your answer",
-	"speak your reply",
-	"answer out loud",
-	"respond out loud",
-] as const;
-
-/**
- * Precompiled matcher: word-boundary alternation of all triggers, e.g.
- *   /\b(reply in voice|voice reply|...)\b/i
- *
- * Word boundaries harden against the phrase sitting inside a larger token
- * (e.g. a future single-word trigger embedded in a compound word, or a
- * trigger butted against punctuation like "voice-reply"). One regex test
- * replaces N `.includes()` scans per message.
- */
-const TRIGGER_RE = new RegExp(
-	`\\b(${TRIGGER_PHRASES.map((p) => p.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join("|")})\\b`,
-	"i",
-);
-
-/** True if the user's message asks for a voice reply (case-insensitive). */
-export function userRequestsVoice(text: string): boolean {
-	return TRIGGER_RE.test(text);
-}
-
 // ── Content extraction ─────────────────────────────────────────────
 
 /**

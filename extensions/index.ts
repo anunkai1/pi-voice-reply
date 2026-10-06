@@ -1,14 +1,13 @@
 /**
- * pi-voice-reply — on-trigger spoken-summary voice replies.
+ * pi-voice-reply — on-request spoken-summary voice replies.
  *
- * When the user asks for a voice reply (e.g. "reply in voice", "say it
- * back", "/voice"), this extension waits for the agent's normal text reply
- * to finish, then asks the same model to rewrite that reply *for listening*
- * in three tiers — a long listenable version, a medium ~250-word summary,
- * and a short 2–3 sentence gist — and emits them as a custom `voice-reply`
- * message. Each variant is generated on demand (per button press), so the
- * message carries only the variant(s) just produced; the client merges
- * them onto the assistant message.
+ * The client asks for one with `/voice-last [long|medium|short]`. This
+ * extension then asks the model to rewrite an assistant reply *for listening*
+ * in one of three tiers — a long listenable version, a medium ~250-word
+ * summary, or a short 2–3 sentence gist — and emits it as a custom
+ * `voice-reply` message. Each variant is generated on demand, so the message
+ * carries only the variant just produced; the client merges it onto the
+ * assistant message.
  *
  * agentchatbox (or any RPC/TUI client) renders that custom message as
  * Long/Med/Short speak buttons. The actual audio synthesis happens
@@ -48,18 +47,9 @@ import {
 	logVoiceFailure,
 	parseVoiceLastArgs,
 	pickVoiceSource,
-	userRequestsVoice,
 } from "./lib.js";
 
 // ── Configuration ──────────────────────────────────────────────────
-
-/**
- * Phrases that trigger a voice reply. Kept deliberately broad — the point is
- * "any natural way the user asks for it works". The /voice command is the
- * guaranteed explicit fallback. (The list + word-boundary matcher live in
- * ./lib.ts; the bare "in voice" entry was dropped as a false-positive
- * source — "reply in voice" / "voice reply" cover the intent.)
- */
 
 /**
  * Long variant prompt. Keeps the substance of the reply but renders it as
@@ -118,7 +108,7 @@ const SHORT_PROMPT = [
 
 /**
  * Variant → prompt map. Each spoken tier has its own rewrite prompt.
- * /voice-last <variant> and the proactive path both index into this.
+ * /voice-last <variant> indexes into this.
  */
 const VARIANT_PROMPTS = {
 	long: LONG_PROMPT,
@@ -132,7 +122,7 @@ type VoiceVariant = keyof typeof VARIANT_PROMPTS;
 
 // ── Helpers ────────────────────────────────────────────────────────
 
-// userRequestsVoice + assistantText moved to ./lib.ts (unit-tested there).
+// assistantText moved to ./lib.ts (unit-tested there).
 
 /**
  * Resolve the model for a spoken-rewrite pass.
@@ -383,9 +373,6 @@ export default function (pi: ExtensionAPI) {
 		return;
 	}
 
-	// Turn-level flag, set by the input handler when the user asks for voice.
-	let voiceRequested = false;
-	let currentCtx: ExtensionContext | undefined;
 	// Backstop flag: set right before we emit the voice-reply custom
 	// message (see emitVoiceReply). If a race ever lets that emit trigger a
 	// spurious continuation turn, the message_end handler below blanks it so
@@ -423,7 +410,7 @@ export default function (pi: ExtensionAPI) {
 		// Partial by design: /voice-last <variant> emits ONE variant at a
 		// time, so only the generated key is present. The client merges it
 		// onto the assistant message without clearing previously-generated
-		// variants. The proactive keyword path emits just { long }.
+		// variants.
 		// `match` echoes the --match hint that picked the source reply, so the
 		// client merges the variant onto THAT message rather than the newest one.
 		details: { long?: string; medium?: string; short?: string; match?: string },
@@ -456,9 +443,7 @@ export default function (pi: ExtensionAPI) {
 		setTimeout(poll, 0);
 	};
 
-	pi.on("session_start", async (_event, ctx) => {
-		currentCtx = ctx;
-		voiceRequested = false;
+	pi.on("session_start", async () => {
 		spuriousTurnPending = false;
 	});
 
@@ -486,23 +471,6 @@ export default function (pi: ExtensionAPI) {
 	 * consumed by the first assistant message_end after it.
 	 */
 	pi.on("message_end", async (event) => {
-		// Detect voice intent from a USER message delivered mid-turn (a steer).
-		// The `input` hook above only fires on the prompt() path — i.e. when the
-		// agent is idle and the user submits a fresh prompt. A voice phrase sent
-		// as a steer while the agent is running takes a different route: it is
-		// queued and drained between tool calls as a plain user message
-		// (message_start + message_end, role:user), never passing through
-		// emitInput(). Without this branch, "reply in voice" steered mid-run
-		// would set no flag and produce no spoken variant — the exact blind
-		// spot we hit. Steers are drained before the next assistant turn, so
-		// setting the flag here lands it in time for the agent_end handler to
-		// act on. Idempotent with the input handler: both may set the same
-		// boolean for a fresh prompt (prompt also emits message_end role:user);
-		// that's harmless, and agent_end consumes the flag exactly once.
-		if (event.message.role === "user") {
-			const text = assistantText(event.message.content);
-			if (text && userRequestsVoice(text)) voiceRequested = true;
-		}
 		if (spuriousTurnPending && event.message.role === "assistant") {
 			spuriousTurnPending = false;
 			return {
@@ -516,12 +484,10 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	/**
-	 * input event: detect voice intent. Always continue — we never block or
-	 * transform the user's actual prompt; we just remember that they wanted
-	 * a voice reply for this turn.
+	 * input event: never blocks or transforms the user's prompt; it only
+	 * clears the spurious-turn backstop (see below).
 	 */
-	pi.on("input", async (event, _ctx) => {
-		const text = typeof event.text === "string" ? event.text : "";
+	pi.on("input", async () => {
 		// A fresh user submission starts a real, user-driven turn. Clear
 		// any stale `spuriousTurnPending` flag here so it can never leak
 		// out of the voice-reply turn it was meant for and blank the NEXT
@@ -539,25 +505,7 @@ export default function (pi: ExtensionAPI) {
 		// while still allowing a genuine spurious turn (if one ever fires
 		// right after sendMessage, before any new input) to be blanked.
 		spuriousTurnPending = false;
-		if (userRequestsVoice(text)) {
-			voiceRequested = true;
-		}
 		return { action: "continue" };
-	});
-
-	/**
-	 * Explicit /voice command — the guaranteed trigger that doesn't depend
-	 * on phrase detection. Sets the flag for the NEXT reply.
-	 */
-	pi.registerCommand("voice", {
-		description: "Request a spoken voice reply for the next answer",
-		handler: async (_args, ctx) => {
-			voiceRequested = true;
-			ctx.ui.notify(
-				"Voice reply requested — speak buttons will appear on the next answer.",
-				"info",
-			);
-		},
 	});
 
 	/**
@@ -632,70 +580,5 @@ export default function (pi: ExtensionAPI) {
 				if (ctx.ui?.setStatus) ctx.ui.setStatus("voice-reply", undefined);
 			}
 		},
-	});
-
-	/**
-	 * agent_end: the full reply is in. If voice was requested, fire a
-	 * single long-variant rewrite pass and emit it as a custom message.
-	 * Medium/short are generated on demand by their own buttons.
-	 */
-	pi.on("agent_end", async (event, ctx) => {
-		currentCtx = ctx;
-		if (!voiceRequested) return;
-		// Consume the flag immediately so a subsequent plain turn stays quiet.
-		voiceRequested = false;
-
-		const messages = event.messages ?? [];
-		// Walk back to the last assistant message (there may be toolResult
-		// messages after it).
-		let lastAssistantText = "";
-		for (let i = messages.length - 1; i >= 0; i--) {
-			const m = messages[i];
-			if (m && m.role === "assistant") {
-				lastAssistantText = assistantText(m.content);
-				if (lastAssistantText.trim()) break;
-			}
-		}
-		if (!lastAssistantText.trim()) return;
-
-		if (ctx.ui?.setStatus) {
-			ctx.ui.setStatus("voice-reply", "preparing voice reply…");
-		}
-
-		try {
-			// Per-variant generation: the proactive keyword trigger defaults to
-			// the long variant (what LongTTS does). Medium/short are generated
-			// on demand by their own buttons via /voice-last, so we don't pay
-			// for them here.
-			const longR = await rewriteForSpeech(ctx, LONG_PROMPT, lastAssistantText);
-			reportFallbacks(ctx, [longR]);
-			const long = longR.text;
-
-			if (!long) {
-				if (ctx.ui?.notify) {
-					ctx.ui.notify(`Voice reply: ${longR.error ?? "model produced no output"}.`, "warning");
-				}
-				return;
-			}
-
-			// Emit the voice-reply custom message. agentchatbox recognizes
-			// customType "voice-reply" and merges the variants onto the last
-			// assistant message, rendering the Long/Med/Short speak buttons;
-			// other clients ignore it. Deferred until idle so it doesn't
-			// trigger a spurious continuation turn — see emitVoiceReply.
-			emitVoiceReply(ctx, { long: long ?? "" });
-		} catch (err) {
-			console.warn("[pi-voice-reply] rewrite failed:", err);
-			if (ctx.ui?.notify) {
-				ctx.ui.notify(
-					`Voice reply failed: ${err instanceof Error ? err.message : String(err)}`,
-					"warning",
-				);
-			}
-		} finally {
-			if (ctx.ui?.setStatus) {
-				ctx.ui.setStatus("voice-reply", undefined);
-			}
-		}
 	});
 }

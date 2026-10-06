@@ -21,47 +21,7 @@ import {
 	logVoiceFailure,
 	parseVoiceLastArgs,
 	pickVoiceSource,
-	userRequestsVoice,
 } from "../extensions/lib.js";
-
-// ── userRequestsVoice ──────────────────────────────────────────────
-
-describe("userRequestsVoice", () => {
-	it("matches the canonical positive phrases (case-insensitive)", () => {
-		expect(userRequestsVoice("please reply in voice")).toBe(true);
-		expect(userRequestsVoice("REPLY WITH VOICE")).toBe(true);
-		expect(userRequestsVoice("ok, voice reply please")).toBe(true);
-		expect(userRequestsVoice("can you read it aloud?")).toBe(true);
-		expect(userRequestsVoice("read it out loud")).toBe(true);
-		expect(userRequestsVoice("say it out loud")).toBe(true);
-		expect(userRequestsVoice("speak your answer")).toBe(true);
-		expect(userRequestsVoice("answer out loud")).toBe(true);
-	});
-
-	it("matches when embedded in a longer sentence with punctuation", () => {
-		expect(userRequestsVoice("Great, reply in voice, thanks.")).toBe(true);
-		expect(userRequestsVoice("please respond out loud.")).toBe(true);
-		expect(userRequestsVoice("could you read your reply aloud?")).toBe(true);
-	});
-
-	// ── The false-positive regressions this change fixes ──
-	it("does NOT match 'I work in voice acting' (bare 'in voice' was removed)", () => {
-		expect(userRequestsVoice("I work in voice acting")).toBe(false);
-		expect(userRequestsVoice("we're in voice chat")).toBe(false);
-	});
-
-	it("does not match a plain request with no voice intent", () => {
-		expect(userRequestsVoice("fix the bug in the parser")).toBe(false);
-		expect(userRequestsVoice("what time is it")).toBe(false);
-		expect(userRequestsVoice("")).toBe(false);
-	});
-
-	it("keeps coverage for 'reply in voice' even though bare 'in voice' is gone", () => {
-		// The removed bare entry is fully covered by these:
-		expect(userRequestsVoice("reply in voice")).toBe(true);
-		expect(userRequestsVoice("reply with voice")).toBe(true);
-	});
-});
 
 // ── assistantText ──────────────────────────────────────────────────
 

@@ -1,14 +1,12 @@
 # pi-voice-reply
 
-On-trigger **spoken-summary voice replies** for the [pi coding agent](https://github.com/earendil-works/pi).
+On-request **spoken-summary voice replies** for the [pi coding agent](https://github.com/earendil-works/pi).
 
-When the user asks for a voice reply ("reply in voice", "say it back", etc.) or
-runs `/voice`, this extension waits for the agent's normal text reply to finish,
-then asks the **same model** to rewrite that reply *for listening* in two
-variants — a **long** listenable version and a **short** concise summary — and
-emits both as a custom `voice-reply` message that a client (e.g.
-[agentchatbox](https://github.com/anunkai1/agentchatbox)) renders as two speak
-buttons.
+A client asks for one with `/voice-last [long|medium|short]`. The extension asks
+the **same model** to rewrite an assistant reply *for listening* and emits the
+result as a custom `voice-reply` message that a client (e.g.
+[agentchatbox](https://github.com/anunkai1/agentchatbox)) plays or shows as a
+speak button.
 
 This extension only produces the **words**. Audio synthesis happens wherever the
 client sends the text (agentchatbox POSTs to its `/api/tts` → Kokoro). The
@@ -36,36 +34,23 @@ Then restart pi (or run `/reload`). The extension is global (all sessions).
 
 ## Trigger
 
-Any of these (matched case-insensitively as **word-boundary** phrases
-anywhere in the user message) request a voice reply for the current turn:
-
-- "reply in voice", "reply with voice", "voice reply"
-- "say it back", "say it out loud"
-- "read it back", "read it aloud", "read it out loud", "read your reply aloud"
-- "talk to me", "speak your answer", "speak your reply"
-- "answer out loud", "respond out loud"
-
-> The bare "in voice" entry was removed — it was the main false-positive
-> source (matched "I work in voice acting", "in voice chat"). The intent
-> is fully covered by "reply in voice" / "voice reply". Word boundaries
-> also prevent matches inside compound words.
-
-Or the explicit command: `/voice`.
-
-When triggered, the next assistant reply gets the two speak buttons attached.
+Only the explicit command: `/voice-last [long|medium|short] [--match "<opening words>"]`
+(default `long`). Without `--match` it voices the newest assistant reply; with it,
+the reply that starts with those words. There are no trigger phrases and no
+`/voice` command; agentchatbox's Voice mode and speak buttons call `/voice-last`.
 
 ## How it works
 
-1. `input` event → phrase detection → set a per-turn `voiceRequested` flag.
-2. `agent_end` → if flagged, take the last assistant message's text and run two
-   **parallel** rewrite passes via ephemeral `createAgentSession` sub-agents
-   using `ctx.model` (the same model driving the conversation):
+1. `/voice-last` takes the chosen assistant message's text and runs ONE rewrite
+   pass via an ephemeral `createAgentSession` sub-agent (the session model, or
+   `VOICE_REWRITE_MODEL` if set):
    - **Long** — keeps all substance; tables→one-sentence summary; code skipped
      (with a one-phrase description of what it did); numbers/versions verbalized;
      emoji/markdown dropped.
+   - **Medium** — a spoken summary of at most 250 words.
    - **Short** — 2-3 sentences: just the conclusion + any essential number.
-3. Emit `pi.sendMessage({ customType: "voice-reply", details: { long, short } })`.
-4. Custom messages are stripped from the model's context (`context` event), and
+2. Emit `pi.sendMessage({ customType: "voice-reply", details: { <variant>: text } })`.
+3. Custom messages are stripped from the model's context (`context` event), and
    the spurious follow-up turn that `sendMessage(steer)` triggers is blanked, so
    the conversation stays clean.
 
@@ -80,7 +65,7 @@ but that's deliberately not wired yet — keep it simple.
 ## Client integration
 
 Clients recognize the custom message by `role === "custom"` and
-`customType === "voice-reply"`, then read `details.long` and `details.short`.
+`customType === "voice-reply"`, then read whichever of `details.long`, `details.medium` and `details.short` is present.
 agentchatbox renders each as a speak button that calls its existing TTS path.
 
 ## Development
@@ -90,7 +75,7 @@ npm install
 npm test          # vitest — pure-helper unit tests (lib.ts)
 ```
 
-The pure helpers (trigger detection, content extraction, the bounded
+The pure helpers (content extraction, reply selection, the bounded
 failure log) live in [`extensions/lib.ts`](extensions/lib.ts) and are
 unit-tested in [`tests/lib.test.ts`](tests/lib.test.ts). Tool/command wiring
 and the model-rewrite orchestration stay in `extensions/index.ts` (exercised
