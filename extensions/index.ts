@@ -3,7 +3,7 @@
  *
  * The client asks for one with `/voice-last [long|medium|short]`. This
  * extension then asks the model to rewrite an assistant reply *for listening*
- * in one of three tiers — a long listenable version, a medium ~250-word
+ * in one of three tiers — a long listenable version, a medium ~150-word
  * summary, or a short 2–3 sentence gist — and emits it as a custom
  * `voice-reply` message. Each variant is generated on demand, so the message
  * carries only the variant just produced; the client merges it onto the
@@ -72,14 +72,14 @@ const LONG_PROMPT = [
 ].join("\n");
 
 /**
- * Medium variant prompt. A spoken summary of at most 250 words — the main
+ * Medium variant prompt. A spoken summary of at most 150 words — the main
  * points and key conclusions with enough detail to be useful, but tighter
  * than the long variant. Like long/short this is produced for listening,
  * but the client ALSO renders it as readable text below the reply.
  */
 const MEDIUM_PROMPT = [
 	"You are preparing an assistant's reply to be read aloud by a text-to-speech system.",
-	"The reply is enclosed in quadruple backticks. Summarize it in at most 250 words of natural spoken prose.",
+	"The reply is enclosed in quadruple backticks. Summarize it in at most 150 words of natural spoken prose.",
 	"",
 	"Rules:",
 	"- Capture the main points and key conclusions with enough detail to be useful.",

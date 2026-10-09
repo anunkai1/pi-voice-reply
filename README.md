@@ -47,7 +47,7 @@ the reply that starts with those words. There are no trigger phrases and no
    - **Long** — keeps all substance; tables→one-sentence summary; code skipped
      (with a one-phrase description of what it did); numbers/versions verbalized;
      emoji/markdown dropped.
-   - **Medium** — a spoken summary of at most 250 words.
+   - **Medium** — a spoken summary of at most 150 words.
    - **Short** — 2-3 sentences: just the conclusion + any essential number.
 2. Emit `pi.sendMessage({ customType: "voice-reply", details: { <variant>: text } })`.
 3. Custom messages are stripped from the model's context (`context` event), and
