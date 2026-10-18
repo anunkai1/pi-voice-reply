@@ -67,6 +67,7 @@ const LONG_PROMPT = [
 	"- Replace any table with one sentence describing what it showed (\"a table comparing X across Y\"), and read the key cells in prose only if they matter.",
 	"- Skip code blocks entirely. If a code block's purpose matters to the answer, say what it does in one short phrase instead of reading the code.",
 	"- Drop emoji, markdown formatting, sigils, and bare URLs.",
+	"- Use short sentences, one idea each; a sentence of twenty words or more should be split.",
 	"- Sound like a person explaining, not reading a document.",
 	"- Output ONLY the spoken text, nothing else. No preamble, no quotes.",
 ].join("\n");
@@ -86,6 +87,7 @@ const MEDIUM_PROMPT = [
 	"- Verbalize numbers, versions, and identifiers the way a person would say them.",
 	"- Replace any table with one sentence describing what it showed; skip code blocks (say what they do in one short phrase instead of reading the code).",
 	"- Drop emoji, markdown formatting, sigils, and bare URLs.",
+	"- Use short sentences, one idea each; a sentence of twenty words or more should be split.",
 	"- Sound like a person explaining, not reading a document.",
 	"- Output ONLY the summary, nothing else. No preamble, no quotes.",
 ].join("\n");
@@ -101,6 +103,7 @@ const SHORT_PROMPT = [
 	"Rules:",
 	"- Capture only the key conclusion and any single essential number.",
 	"- No code, no tables, no emoji, no markdown.",
+	"- Use short sentences, one idea each; a sentence of twenty words or more should be split.",
 	"- Conversational and concise.",
 	"- Output ONLY the summary, nothing else. No preamble, no quotes.",
 ].join("\n");
