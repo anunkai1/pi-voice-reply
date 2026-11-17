@@ -38,6 +38,9 @@ Only the explicit command: `/voice-last [long|medium|short] [--match "<opening w
 (default `long`). Without `--match` it voices the newest assistant reply; with it,
 the reply that starts with those words. There are no trigger phrases and no
 `/voice` command; agentchatbox's Voice mode and speak buttons call `/voice-last`.
+Worker reports (`note` messages with `details.source: "delegate-telegram"`) also
+count as replies, including when selected by an older report's opening words.
+Parent-chat status notes and other extension notes are not voice sources.
 
 ## How it works
 

@@ -141,12 +141,15 @@ export function parseVoiceLastArgs(args: string): { variant: VoiceVariant; match
 export interface BranchMessageLike {
 	role?: string;
 	content?: unknown;
+	customType?: string;
+	details?: unknown;
 }
 
 /**
  * Choose the reply text to voice, preferring the message a hint names.
  *
- * `messages` is in session order. With a hint, the NEWEST assistant message
+ * `messages` is in session order (including custom worker-report notes).
+ * With a hint, the NEWEST assistant message or worker report
  * whose text starts with it wins, and `matched` says whether that happened —
  * the caller echoes it so the client merges the variant onto the same message.
  * Without a hint, or when nothing matches, this is the newest assistant message
@@ -160,7 +163,11 @@ export function pickVoiceSource(
 	let newest = "";
 	for (let i = messages.length - 1; i >= 0; i--) {
 		const msg = messages[i];
-		if (!msg || msg.role !== "assistant") continue;
+		if (!msg) continue;
+		const workerReport =
+			msg.role === "custom" && msg.customType === "note" &&
+			(msg.details as { source?: unknown } | undefined)?.source === "delegate-telegram";
+		if (msg.role !== "assistant" && !workerReport) continue;
 		const text = assistantText(msg.content);
 		if (!text.trim()) continue;
 		if (!newest) newest = text;

@@ -535,6 +535,7 @@ export default function (pi: ExtensionAPI) {
 			for (const entry of entries) {
 				// biome-ignore lint/suspicious/noExplicitAny: entry union is wide
 				if (entry && (entry as any).type === "message") messages.push((entry as any).message);
+				else if (entry.type === "custom_message") messages.push({ ...entry, role: "custom" });
 			}
 			const picked = pickVoiceSource(messages, match);
 			const lastText = picked.text;

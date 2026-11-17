@@ -220,6 +220,14 @@ describe("pickVoiceSource", () => {
 		expect(pickVoiceSource(withEmpty, "Real")).toMatchObject({ matched: true });
 	});
 
+	it("voices worker reports, including older reports selected by hint, but not parent status notes", () => {
+		const report = { role: "custom", customType: "note", content: "Worker report: fixed.", details: { source: "delegate-telegram" } };
+		const status = { ...report, content: "Parent status", details: { source: "delegate" } };
+		expect(pickVoiceSource([...branch, report, status])).toEqual({ text: report.content, matched: false });
+		expect(pickVoiceSource([...branch, report, msg("assistant", "Later answer")], "Worker report")).toEqual({ text: report.content, matched: true });
+		expect(pickVoiceSource([...branch, status]).text).toBe("Second reply about audio.");
+	});
+
 	it("returns empty text when there is no assistant reply at all", () => {
 		expect(pickVoiceSource([msg("user", "hello")])).toEqual({ text: "", matched: false });
 	});
