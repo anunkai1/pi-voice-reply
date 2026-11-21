@@ -9,7 +9,7 @@ result as a custom `voice-reply` message that a client (e.g.
 speak button.
 
 This extension only produces the **words**. Audio synthesis happens wherever the
-client sends the text (agentchatbox POSTs to its `/api/tts` → Kokoro). The
+client sends the text (agentchatbox POSTs to its `/api/tts` → ZONOS3-Mini). The
 extension itself is TTS-engine-agnostic.
 
 ## Why
